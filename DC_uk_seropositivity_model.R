@@ -12,7 +12,7 @@ library(readxl)
 # Load data from ons
 temp <- tempfile(fileext = ".xlsx")
 # Also saved in folder as "publishedweek512020corrected.xlsx" 
-download.file("https://www.ons.gov.uk/file?uri=%2fpeoplepopulationandcommunity%2fbirthsdeathsandmarriages%2fdeaths%2fdatasets%2fweeklyprovisionalfiguresondeathsregisteredinenglandandwales%2f2020/publishedweek522020.xlsx", destfile=temp, mode='wb')
+download.file("https://www.ons.gov.uk/file?uri=%2fpeoplepopulationandcommunity%2fbirthsdeathsandmarriages%2fdeaths%2fdatasets%2fweeklyprovisionalfiguresondeathsregisteredinenglandandwales%2f2020/publishedweek532020.xlsx", destfile=temp, mode='wb')
 
 # Read in relevant sheet
 ons <- data.frame(readxl::read_excel(temp, sheet = 7, skip = 4, col_types = "text"))
@@ -35,13 +35,16 @@ ons <- ons[!ons$age %in% c("Deaths by age group",
 # From wide to long format
 library(tidyr)
 ons <- unique(ons) %>% gather(week, deaths, -c(sex, age))
-ons$week <- as.numeric(unlist(gsub("X", "", ons$week)))
 ons$deaths <- as.numeric(ons$deaths)
+ons$week <- as.numeric(unlist(gsub("X", "", ons$week)))
+
+# Change to weeks since Jan 2020, leveraging that they come in order
+ons$week <- ons$week + cumsum(ons$week < c(0, ons$week[-length(ons$week)]))*52
 
 # Getting date
-ons$date <- as.Date(NA)
-ons$date[ons$week != 53] <- as.Date(paste(2020, ons$week[ons$week != 53], 1, sep="-"), "%Y-%U-%u")
-ons$date[ons$week == 53] <- max(ons$date + 7, na.rm = T) 
+dates <- data.frame(readxl::read_excel(temp, sheet = 7, col_types = "text"))[5, ]
+dates <- cbind.data.frame(date = as.Date(as.numeric(unlist(dates[, 3:c(ncol(dates)-1)])),  origin = "1899-12-30"), week = unique(ons$week))
+ons <- merge(ons, dates, by = "week", all.x = T)
 
 # Inspect to ensure they roughly match, and match other stats (e.g. gov.uk)
 library(ggplot2)
@@ -50,7 +53,7 @@ ggplot(ons, aes(x=date, y=deaths,
   geom_area(data = ons[ons$sex == "all", ], aes(fill = "Total"))+
   geom_area(data = ons[ons$sex != "all", ], aes(fill = "Sum"), 
             alpha = 0.5)+
-  theme_minimal()+xlab("")
+  theme_minimal()+xlab("")+geom_vline(aes(xintercept = unique(ons$date[ons$week == 52])[1]))
 
 # We also check manually that they match:
 sum(ons$deaths[ons$sex == "f"] + ons$deaths[ons$sex == "m"], na.rm = T) == sum(ons$deaths[ons$sex == "all"], na.rm = T)
@@ -110,13 +113,14 @@ ons$sero_estimate_high <- ons$deaths*(100/ons$ifr_low) # opposite necessary here
 # Load cases and deaths
 temp <- tempfile(fileext = ".csv")
 download.file("https://coronavirus.data.gov.uk/api/v1/data?filters=areaType=nation&structure=%7B%22areaType%22:%22areaType%22,%22areaName%22:%22areaName%22,%22areaCode%22:%22areaCode%22,%22date%22:%22date%22,%22newCasesByPublishDate%22:%22newCasesByPublishDate%22,%22cumCasesByPublishDate%22:%22cumCasesByPublishDate%22%7D&format=csv", destfile=temp, mode='wb')
+
 # Also saved in folder as "publishedweek512020corrected.xlsx" 
 
 # Read in relevant sheet
 dat <- data.frame(read.csv(temp))
 
 # Restrict to England and Wales and drop last 5 days
-dat <- dat[dat$areaName %in% c("England", "Wales") & dat$date <= as.Date("2021-01-03"), ]
+dat <- dat[dat$areaName %in% c("England", "Wales") & dat$date <= as.Date(Sys.Date()-5), ]
 dat$new_cases <- ave(dat$newCasesByPublishDate, dat$date, FUN = function(x) sum(x, na.rm = T))
 dat$confirmed <- ave(dat$cumCasesByPublishDate, dat$date, FUN = function(x) sum(x, na.rm = T))
 dat$date <- as.Date(dat$date)
@@ -127,20 +131,16 @@ dat$new_cases_7dma[i] <- mean(dat$new_cases[max(c(1,i-6)):i])
 dat$pop.2020 <- 59439840
 ggplot(dat, aes(x=date, y=new_cases_7dma))+geom_line()
 
-
-# 
-# dat <- read.csv("C:/Users/sondr/git-projects/corona/output-data/dat.ts.csv")
-# dat <- dat[!is.na(dat$date) & !is.na(dat$iso2c) & dat$date <= "2021-01-03", ]
-# dat <- dat[dat$iso2c == "GB", ]
-# 
-# write.csv(dat[, c("country.name", "date", "confirmed", "deaths", "new_deaths", "new_cases", "new_cases_7dma", "new_deaths_7dma", "pop.2020")], "official_cases.csv")
-# 
-# dat <- read.csv("official_cases.csv")
-
+# Get date and week in order
 dat$date <- as.Date(dat$date)
 library(lubridate)
 dat$week <- week(dat$date)
+dat$week[year(dat$date) == "2021" & dat$week <= 53] <- dat$week[year(dat$date) == "2021"  & dat$week <= 53] + max(dat$week) # ensure weeks since jan 2020 rather than week of year
 
+# Check to ensure correct merging:
+max(table(dat$week)) == 7
+
+# Define functions to get weekly sums of cases
 weekly_sum <- function(x){
   x <- na.omit(x)
   if(length(x) == 7){
@@ -165,8 +165,21 @@ dat$new_cases_reported_7dma <- ave(dat$new_cases_7dma, dat$week, FUN = end_of_we
 dat$total_cases <- dat$confirmed
 dat <- rev(dat)
 
+# Add empty rows to the ONS to facilitate interpolation of recent weeks
+for(i in (max(ons$week)+1):max(df$week)){
+  temp <- ons[ons$week == max(ons$week), ]
+  temp[, c("deaths", "sero_estimate", "sero_estimate_low", "sero_estimate_high")] <- NA
+  temp$week <- i
+  ons <- rbind(ons, temp)
+}
+
 # Merging official and estimated cases
 df <- merge(ons, dat[!duplicated(dat$week), c( "total_cases", "new_cases_reported",  "new_cases_reported_7dma", "pop.2020", "week")], by = "week", all.y= T)
+
+# Get date for df:
+for(i in 52:max(df$week)){
+  df$date[df$week == i] <- unique(as.Date(df$date[df$week == i - 1] + 7))
+}
 
 # Shift to account for lag between infections and death:
 # Time lag from cases to death:
@@ -191,7 +204,7 @@ ggplot(df, aes(x=as.Date(date), y=pred_infections))+
   theme_minimal()
 
 # We next augment the model by extending data for recent week based on reported cases
-last_week_of_good_data <- 50
+last_week_of_good_data <- 52
 
 for(t in c("pred_infections", "pred_infections_low", "pred_infections_high")){
   df$temp <- df[, t]
@@ -284,10 +297,10 @@ ggplot(df[!duplicated(df$week), ], aes(x=as.Date(date)))+
   theme_minimal()+xlab("")+ylab("")+scale_y_continuous(labels = scales::comma)+theme(legend.position = "bottom", legend.title = element_blank())+ggtitle("Britain's Pandemic\nWeekly totals, England and Wales\n(blue) Reported covid-19 cases, \n(red) Estimated Infections based on The Economist's seropositivity model \n(with 95% confidence interval)")
 ggsave("panel_a.png", width = 10, height = 10)
 
-# Plot 4: (Panel B)
 
+# Plot 4: (Panel B)
 ggplot(df, aes(x=date, fill=age, group=age))+
-  geom_col(aes(y=100*pred_infections_total/(1000*df$pop.2020[1])))+ylab("%")+theme_minimal()+ggtitle("Estimated cumulative cases by age group, weekly totals")
+  geom_col(aes(y=100*pred_infections_total/(1000*pop.2020[1])))+ylab("%")+theme_minimal()+ggtitle("Estimated cumulative cases by age group, weekly totals")
 ggsave("panel_b.png", width = 10, height = 10)
 
 
